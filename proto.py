@@ -128,6 +128,24 @@ def jax_backend(op: str, *args: Any, **kwargs: Any) -> Any:
         key = jax.random.PRNGKey(seed)
         mask = jax.random.bernoulli(key, 1 - p, x.shape)
         return jax.jit(lambda x, m: x * m / (1 - p))(x, mask)
+    elif op == "linear":
+        if len(args) < 2 or len(args) > 3:
+            raise ValueError(f"linear requires 2 or 3 arguments, got {len(args)}")
+        x, w = args[0], args[1]
+        b = args[2] if len(args) == 3 else None
+        out = jax.jit(jnp.dot)(x, w)
+        if b is not None:
+            out = jax.jit(jnp.add)(out, b)
+        return out
+    elif op == "sigmoid":
+        if len(args) != 1:
+            raise ValueError(f"sigmoid requires 1 argument, got {len(args)}")
+        return jax.jit(jax.nn.sigmoid)(args[0])
+    elif op == "tanh":
+        if len(args) != 1:
+            raise ValueError(f"tanh requires 1 argument, got {len(args)}")
+        return jax.jit(jnp.tanh)(args[0])
+    
     raise OperationNotSupportedError(f"Operation '{op}' not supported in JAX backend.")
 
 def torch_backend(op: str, *args: Any, **kwargs: Any) -> Any:
@@ -213,6 +231,22 @@ def torch_backend(op: str, *args: Any, **kwargs: Any) -> Any:
         p = kwargs.get("p", 0.5)
         training = kwargs.get("training", True)
         return torch.nn.functional.dropout(x, p=p, training=training)
+    elif op == "linear":
+        if len(args) < 2 or len(args) > 3:
+            raise ValueError(f"linear requires 2 or 3 arguments, got {len(args)}")
+        x, w = args[0], args[1]
+        w = w.t()
+        b = args[2] if len(args) == 3 else None
+        return torch.nn.functional.linear(x, w, b)
+    elif op == "sigmoid":
+        if len(args) != 1:
+            raise ValueError(f"sigmoid requires 1 argument, got {len(args)}")
+        return torch.sigmoid(args[0])
+    elif op == "tanh":
+        if len(args) != 1:
+            raise ValueError(f"tanh requires 1 argument, got {len(args)}")
+        return torch.tanh(args[0])
+    
     raise OperationNotSupportedError(f"Operation '{op}' not supported in Torch backend.")
 
 DEFAULT_BACKENDS = {"jax": jax_backend, "torch": torch_backend}
@@ -279,6 +313,19 @@ class RelayX:
     def dropout(self, x: RelayTensor, p: float = 0.5, training: bool = True, seed: int = 0, backend: str = None) -> RelayTensor:
         return self.compute("dropout", x, p=p, training=training, seed=seed, backend=backend)
 
+    def linear(self, x: RelayTensor, w: RelayTensor, b: Optional[RelayTensor] = None, backend: str = None) -> RelayTensor:
+        return self.compute("linear", x, w, b, backend=backend)
+    
+    def sigmoid(self, x: RelayTensor, backend: str = None) -> RelayTensor:
+        return self.compute("sigmoid", x, backend=backend)
+    
+    def tanh(self, x: RelayTensor, backend: str = None) -> RelayTensor:
+        return self.compute("tanh", x, backend=backend)
+    
+    def conv1d(self, inputs: RelayTensor, kernel: RelayTensor, strides: Tuple[int] = (1,), 
+            padding: str = "VALID", backend: str = None) -> RelayTensor:
+        return self.compute("conv1d", inputs, kernel, strides=strides, padding=padding, backend=backend)
+
 def test_relayx():
     relayx = RelayX()
     x_jax = RelayTensor(jnp.ones((2, 3)))
@@ -342,5 +389,27 @@ def test_relayx():
     dropout_input_torch = RelayTensor(torch.ones(2, 3, dtype=torch.float32))
     dropout_torch = relayx.dropout(dropout_input_torch, p=0.5, training=True, seed=42, backend="torch")
     print("Torch dropout:", dropout_torch.shape, dropout_torch.data)
+    x_linear = RelayTensor(jnp.ones((2, 3)))
+    w_linear = RelayTensor(jnp.ones((3, 4)))
+    b_linear = RelayTensor(jnp.ones((4,)))
+    linear_jax = relayx.linear(x_linear, w_linear, b_linear)
+    print("JAX linear:", linear_jax.shape, linear_jax.data)
+    x_linear_torch = RelayTensor(torch.ones(2, 3))
+    w_linear_torch = RelayTensor(torch.ones(3, 4))
+    b_linear_torch = RelayTensor(torch.ones(4))
+    linear_torch = relayx.linear(x_linear_torch, w_linear_torch, b_linear_torch, backend="torch")
+    print("Torch linear:", linear_torch.shape, linear_torch.data)
+    x_sigmoid = RelayTensor(jnp.array([-1, 0, 1], dtype=jnp.float32))
+    sigmoid_jax = relayx.sigmoid(x_sigmoid)
+    print("JAX sigmoid:", sigmoid_jax.shape, sigmoid_jax.data)
+    x_sigmoid_torch = RelayTensor(torch.tensor([-1, 0, 1], dtype=torch.float32))
+    sigmoid_torch = relayx.sigmoid(x_sigmoid_torch, backend="torch")
+    print("Torch sigmoid:", sigmoid_torch.shape, sigmoid_torch.data)
+    x_tanh = RelayTensor(jnp.array([-1, 0, 1], dtype=jnp.float32))
+    tanh_jax = relayx.tanh(x_tanh)
+    print("JAX tanh:", tanh_jax.shape, tanh_jax.data)
+    x_tanh_torch = RelayTensor(torch.tensor([-1, 0, 1], dtype=torch.float32))
+    tanh_torch = relayx.tanh(x_tanh_torch, backend="torch")
+    print("Torch tanh:", tanh_torch.shape, tanh_torch.data)
 
 test_relayx()
