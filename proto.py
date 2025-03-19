@@ -1,4 +1,5 @@
-from typing import Any, Dict, Callable, Tuple
+from typing import Any, Dict, Callable, Tuple, Union, Optional
+from functools import partial
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -75,9 +76,59 @@ def jax_backend(op: str, *args: Any, **kwargs: Any) -> Any:
         if len(args) != 2:
             raise ValueError(f"add requires 2 arguments, got {len(args)}")
         return jax.jit(jnp.add)(*args)
-    raise OperationNotSupportedError(
-        f"Operation '{op}' not supported in JAX backend."
-    )
+    elif op == "relu":
+        if len(args) != 1:
+            raise ValueError(f"relu requires 1 argument, got {len(args)}")
+        return jax.jit(jnp.maximum)(args[0], 0)
+    elif op == "max_pool2d":
+        if len(args) != 1:
+            raise ValueError(f"max_pool2d requires 1 argument, got {len(args)}")
+        window_shape = kwargs.get("kernel_size", (2, 2))
+        strides = kwargs.get("strides", window_shape)
+        padding = kwargs.get("padding", "VALID")
+        def pool_fn(x):
+            return lax.reduce_window(x, -jnp.inf, jax.lax.max, (1, *window_shape, 1), (1, *strides, 1), padding)
+        return jax.jit(pool_fn)(args[0])
+    elif op == "mean":
+        if len(args) != 1:
+            raise ValueError(f"mean requires 1 argument, got {len(args)}")
+        axis = kwargs.get("axis", None)
+        return jax.jit(jnp.mean)(args[0], axis=axis)
+    elif op == "softmax":
+        if len(args) != 1:
+            raise ValueError(f"softmax requires 1 argument, got {len(args)}")
+        axis = kwargs.get("axis", -1)
+        softmax_fn = partial(jax.nn.softmax, axis=axis)
+        return jax.jit(softmax_fn)(args[0])
+    elif op == "batch_norm2d":
+        if len(args) != 1:
+            raise ValueError(f"batch_norm2d requires 1 argument, got {len(args)}")
+        x = args[0]
+        eps = kwargs.get("eps", 1e-5)
+        momentum = kwargs.get("momentum", 0.1)
+        mean = jnp.mean(x, axis=(0, 1, 2), keepdims=True)
+        var = jnp.var(x, axis=(0, 1, 2), keepdims=True)
+        return jax.jit(lambda x: (x - mean) / jnp.sqrt(var + eps))(x)
+    elif op == "transpose":
+        if len(args) != 1:
+            raise ValueError(f"transpose requires 1 argument, got {len(args)}")
+        dims = kwargs.get("dims")
+        if dims is None:
+            raise ValueError("transpose requires 'dims' argument")
+        return jax.jit(lambda x, dims=dims: jnp.transpose(x, dims))(args[0])
+    elif op == "dropout":
+        if len(args) != 1:
+            raise ValueError(f"dropout requires 1 argument, got {len(args)}")
+        x = args[0]
+        p = kwargs.get("p", 0.5)
+        training = kwargs.get("training", True)
+        seed = kwargs.get("seed", 0)
+        if not training:
+            return x
+        key = jax.random.PRNGKey(seed)
+        mask = jax.random.bernoulli(key, 1 - p, x.shape)
+        return jax.jit(lambda x, m: x * m / (1 - p))(x, mask)
+    raise OperationNotSupportedError(f"Operation '{op}' not supported in JAX backend.")
 
 def torch_backend(op: str, *args: Any, **kwargs: Any) -> Any:
     args = tuple(arg.to_backend("torch").data if isinstance(arg, RelayTensor) else arg for arg in args)
@@ -105,9 +156,64 @@ def torch_backend(op: str, *args: Any, **kwargs: Any) -> Any:
         if len(args) != 2:
             raise ValueError(f"add requires 2 arguments, got {len(args)}")
         return torch.add(*args)
-    raise OperationNotSupportedError(
-        f"Operation '{op}' not supported in Torch backend."
-    )
+    elif op == "relu":
+        if len(args) != 1:
+            raise ValueError(f"relu requires 1 argument, got {len(args)}")
+        return torch.nn.functional.relu(args[0])
+    elif op == "max_pool2d":
+        if len(args) != 1:
+            raise ValueError(f"max_pool2d requires 1 argument, got {len(args)}")
+        inputs = args[0]
+        kernel_size = kwargs.get("kernel_size", (2, 2))
+        strides = kwargs.get("strides", kernel_size)
+        padding = 0 if kwargs.get("padding", "VALID") == "VALID" else "same"
+        if inputs.shape[1] != inputs.shape[3] and inputs.shape[1] != 3:
+            inputs = inputs.permute(0, 3, 1, 2)
+        result = torch.nn.functional.max_pool2d(
+            inputs, kernel_size=kernel_size, stride=strides, padding=padding
+        )
+        if inputs.shape[1] != inputs.shape[3] and inputs.shape[1] != 3:
+            result = result.permute(0, 2, 3, 1)
+        return result
+    elif op == "mean":
+        if len(args) != 1:
+            raise ValueError(f"mean requires 1 argument, got {len(args)}")
+        dim = kwargs.get("axis", None)
+        return torch.mean(args[0], dim=dim)
+    elif op == "softmax":
+        if len(args) != 1:
+            raise ValueError(f"softmax requires 1 argument, got {len(args)}")
+        dim = kwargs.get("axis", -1)
+        return torch.nn.functional.softmax(args[0], dim=dim)
+    elif op == "batch_norm2d":
+        if len(args) != 1:
+            raise ValueError(f"batch_norm2d requires 1 argument, got {len(args)}")
+        inputs = args[0]
+        eps = kwargs.get("eps", 1e-5)
+        momentum = kwargs.get("momentum", 0.1)
+        needs_permute = inputs.shape[1] != inputs.shape[3]
+        if needs_permute:
+            inputs = inputs.permute(0, 3, 1, 2)
+        bn = torch.nn.BatchNorm2d(inputs.shape[1], eps=eps, momentum=momentum, affine=False, track_running_stats=False)
+        result = bn(inputs)
+        if needs_permute:
+            result = result.permute(0, 2, 3, 1)
+        return result
+    elif op == "transpose":
+        if len(args) != 1:
+            raise ValueError(f"transpose requires 1 argument, got {len(args)}")
+        dims = kwargs.get("dims")
+        if dims is None:
+            raise ValueError("transpose requires 'dims' argument")
+        return torch.permute(args[0], dims)
+    elif op == "dropout":
+        if len(args) != 1:
+            raise ValueError(f"dropout requires 1 argument, got {len(args)}")
+        x = args[0]
+        p = kwargs.get("p", 0.5)
+        training = kwargs.get("training", True)
+        return torch.nn.functional.dropout(x, p=p, training=training)
+    raise OperationNotSupportedError(f"Operation '{op}' not supported in Torch backend.")
 
 DEFAULT_BACKENDS = {"jax": jax_backend, "torch": torch_backend}
 
@@ -146,6 +252,33 @@ class RelayX:
     def add(self, a: RelayTensor, b: RelayTensor, backend: str = None) -> RelayTensor:
         return self.compute("add", a, b, backend=backend)
 
+    def relu(self, x: RelayTensor, backend: str = None) -> RelayTensor:
+        return self.compute("relu", x, backend=backend)
+
+    def max_pool2d(self, inputs: RelayTensor, kernel_size: Tuple[int, int] = (2, 2),
+                   strides: Optional[Tuple[int, int]] = None, padding: str = "VALID",
+                   backend: str = None) -> RelayTensor:
+        strides = strides or kernel_size
+        return self.compute("max_pool2d", inputs, kernel_size=kernel_size, strides=strides,
+                            padding=padding, backend=backend)
+
+    def mean(self, x: RelayTensor, axis: Union[int, Tuple[int, ...], None] = None,
+             backend: str = None) -> RelayTensor:
+        return self.compute("mean", x, axis=axis, backend=backend)
+
+    def softmax(self, x: RelayTensor, axis: int = -1, backend: str = None) -> RelayTensor:
+        return self.compute("softmax", x, axis=axis, backend=backend)
+
+    def batch_norm2d(self, inputs: RelayTensor, eps: float = 1e-5, momentum: float = 0.1,
+                     backend: str = None) -> RelayTensor:
+        return self.compute("batch_norm2d", inputs, eps=eps, momentum=momentum, backend=backend)
+
+    def transpose(self, x: RelayTensor, dims: Tuple[int, ...], backend: str = None) -> RelayTensor:
+        return self.compute("transpose", x, dims=dims, backend=backend)
+
+    def dropout(self, x: RelayTensor, p: float = 0.5, training: bool = True, seed: int = 0, backend: str = None) -> RelayTensor:
+        return self.compute("dropout", x, p=p, training=training, seed=seed, backend=backend)
+
 def test_relayx():
     relayx = RelayX()
     x_jax = RelayTensor(jnp.ones((2, 3)))
@@ -167,5 +300,47 @@ def test_relayx():
     b = RelayTensor(jnp.ones((2, 2)))
     add_jax = relayx.add(a, b)
     print("JAX add:", add_jax.shape, add_jax.data)
+    x_relu = RelayTensor(jnp.array([-1, 2, -3, 4]))
+    relu_jax = relayx.relu(x_relu)
+    print("JAX relu:", relu_jax.shape, relu_jax.data)
+    x_relu_torch = RelayTensor(torch.tensor([-1, 2, -3, 4], dtype=torch.float32))
+    relu_torch = relayx.relu(x_relu_torch, backend="torch")
+    print("Torch relu:", relu_torch.shape, relu_torch.data)
+    pool_input = RelayTensor(jnp.ones((1, 28, 28, 1)))
+    pool_jax = relayx.max_pool2d(pool_input, kernel_size=(2, 2), strides=(2, 2))
+    print("JAX max_pool2d:", pool_jax.shape, pool_jax.data)
+    pool_input_torch = RelayTensor(torch.ones(1, 28, 28, 1))
+    pool_torch = relayx.max_pool2d(pool_input_torch, kernel_size=(2, 2), strides=(2, 2), backend="torch")
+    print("Torch max_pool2d:", pool_torch.shape, pool_torch.data)
+    mean_input = RelayTensor(jnp.array([1, 2, 3, 4]))
+    mean_jax = relayx.mean(mean_input)
+    print("JAX mean:", mean_jax.shape, mean_jax.data)
+    mean_input_torch = RelayTensor(torch.tensor([1, 2, 3, 4], dtype=torch.float32))
+    mean_torch = relayx.mean(mean_input_torch, backend="torch")
+    print("Torch mean:", mean_torch.shape, mean_torch.data)
+    softmax_input = RelayTensor(jnp.array([1, 2, 3, 4], dtype=jnp.float32))
+    softmax_jax = relayx.softmax(softmax_input, axis=0)
+    print("JAX softmax:", softmax_jax.shape, softmax_jax.data)
+    softmax_input_torch = RelayTensor(torch.tensor([1, 2, 3, 4], dtype=torch.float32))
+    softmax_torch = relayx.softmax(softmax_input_torch, axis=0, backend="torch")
+    print("Torch softmax:", softmax_torch.shape, softmax_torch.data)
+    bn_input = RelayTensor(jnp.ones((2, 4, 4, 2), dtype=jnp.float32) * 2 + 1)
+    bn_jax = relayx.batch_norm2d(bn_input)
+    print("JAX batch_norm2d:", bn_jax.shape, bn_jax.data.mean(), bn_jax.data.std())
+    bn_input_torch = RelayTensor(torch.ones(2, 4, 4, 2, dtype=torch.float32) * 2 + 1)
+    bn_torch = relayx.batch_norm2d(bn_input_torch, backend="torch")
+    print("Torch batch_norm2d:", bn_torch.shape, bn_torch.data.mean(), bn_torch.data.std())
+    transpose_input = RelayTensor(jnp.ones((2, 3, 4)))
+    transpose_jax = relayx.transpose(transpose_input, dims=(1, 0, 2))
+    print("JAX transpose:", transpose_jax.shape, transpose_jax.data)
+    transpose_input_torch = RelayTensor(torch.ones(2, 3, 4))
+    transpose_torch = relayx.transpose(transpose_input_torch, dims=(1, 0, 2), backend="torch")
+    print("Torch transpose:", transpose_torch.shape, transpose_torch.data)
+    dropout_input = RelayTensor(jnp.ones((2, 3), dtype=jnp.float32))
+    dropout_jax = relayx.dropout(dropout_input, p=0.5, training=True, seed=42)
+    print("JAX dropout:", dropout_jax.shape, dropout_jax.data)
+    dropout_input_torch = RelayTensor(torch.ones(2, 3, dtype=torch.float32))
+    dropout_torch = relayx.dropout(dropout_input_torch, p=0.5, training=True, seed=42, backend="torch")
+    print("Torch dropout:", dropout_torch.shape, dropout_torch.data)
 
 test_relayx()

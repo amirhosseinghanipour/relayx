@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "relayx"
+version = "0.1.0"
+description = "RelayX is a unified tensor computation for machine learning frameworks."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Amirhossein Ghanipour", email = "d3v1ll3n@gmail.com" }
+]
+dependencies = [
+    "jax",
+    "torch",
+    "numpy"
+]
+
+[tool.setuptools]
+packages = ["relayx"]
+
+[tool.setuptools.package-data]
+relayx = ["py.typed"]
+
+[tool.setuptools.scripts]
+relayx = "relayx:main"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+
+[project.urls]
+Homepage = "https://github.com/amirhosseinghanipour/relayx"

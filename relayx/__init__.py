@@ -1,4 +1,4 @@
-"""RelayX is a hardware-agnostic compute abstraction for machine learning frameworks."""
+"""RelayX is a unified tensor computation for machine learning frameworks."""
 from .tensor import RelayTensor
 from .compute import RelayX
 
